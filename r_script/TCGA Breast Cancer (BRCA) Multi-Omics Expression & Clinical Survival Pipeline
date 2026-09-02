@@ -1,0 +1,117 @@
+## =====================================================================
+## TCGA-BRCA Transcriptomics & Survival Workflow
+## Author: Prakash Nath | Tech Stack: DESeq2, clusterProfiler, Survival
+## =====================================================================
+
+library(TCGAbiolinks)
+library(DESeq2)
+library(ggplot2)
+library(clusterProfiler)
+library(org.Hs.eg.db)
+library(enrichplot)
+library(survival)
+library(survminer)
+
+# 1. DATA ACQUISITION WITH CACHING -------------------------------------
+rds_path <- "tcga_brca.rds"
+
+if (!file.exists(rds_path)) {
+  message("Downloading data from GDC...")
+  query <- GDCquery(project = "TCGA-BRCA",
+                    data.category = "Transcriptome Profiling",
+                    data.type = "Gene Expression Quantification",
+                    workflow.type = "STAR - Counts")
+  GDCdownload(query)
+  data <- GDCprepare(query)
+  saveRDS(data, rds_path)
+} else {
+  message("Loading cached dataset locally...")
+  data <- readRDS(rds_path)
+}
+
+# 2. EXPRESSION MATRIX & ROBUST METADATA -------------------------------
+counts <- assay(data)
+
+# Extract official metadata and add custom factor column securely
+metadata_df <- as.data.frame(colData(data))
+metadata_df$condition <- factor(ifelse(metadata_df$sample_type == "Primary Tumor", "Tumor", "Normal"))
+
+# Verify column-row synchronization
+stopifnot(all(colnames(counts) == rownames(metadata_df)))
+
+# 3. DIFFERENTIAL EXPRESSION ANALYSIS ----------------------------------
+dds <- DESeqDataSetFromMatrix(countData = counts,
+                              colData = metadata_df,
+                              design = ~ condition)
+
+# Filter out low-count genes to boost computational performance
+keep <- rowSums(counts(dds)) >= 10
+dds <- dds[keep,]
+
+dds <- DESeq(dds)
+res <- results(dds)
+res_ordered <- res[order(res$padj), ]
+res_df <- as.data.frame(res_ordered)
+
+# Isolate clean, statistically significant genes
+sigGenes <- res_df[!is.na(res_df$padj) & res_df$padj < 0.05 & abs(res_df$log2FoldChange) > 1, ]
+
+# 4. VOLCANO PLOT VISUALIZATION ----------------------------------------
+res_df$significant <- "Not Significant"
+res_df$significant[res_df$padj < 0.05 & res_df$log2FoldChange > 1] <- "Up-regulated"
+res_df$significant[res_df$padj < 0.05 & res_df$log2FoldChange < -1] <- "Down-regulated"
+
+ggplot(res_df[!is.na(res_df$padj), ], aes(x = log2FoldChange, y = -log10(padj), color = significant)) +
+  geom_point(alpha = 0.4, size = 1) +
+  scale_color_manual(values = c("Down-regulated" = "blue", "Not Significant" = "grey", "Up-regulated" = "red")) +
+  theme_minimal() +
+  labs(title = "TCGA Breast Cancer Volcano Plot (Tumor vs Normal)",
+       x = "Log2 Fold Change", y = "-log10 Adjusted p-value")
+
+# 5. ORA PATHWAY ENRICHMENT (GO & KEGG) --------------------------------
+# Strip version numbers from Ensembl IDs (e.g., ENSG00000141510.12 -> ENSG00000141510)
+clean_ensembl <- gsub("\\..*", "", rownames(sigGenes))
+
+gene_conversion <- bitr(clean_ensembl, fromType = "ENSEMBL", toType = "ENTREZID", OrgDb = org.Hs.eg.db)
+gene_ids <- gene_conversion$ENTREZID
+
+# GO Biological Process
+go_result <- enrichGO(gene = gene_ids, OrgDb = org.Hs.eg.db, keyType = "ENTREZID",
+                      ont = "BP", pAdjustMethod = "BH", qvalueCutoff = 0.05)
+go_plot <- dotplot(go_result, showCategory = 10, title = "GO Biological Processes")
+print(go_plot)
+
+# KEGG Pathways
+kegg_result <- enrichKEGG(gene = gene_ids, organism = "hsa", pvalueCutoff = 0.05)
+kegg_plot <- dotplot(kegg_result, showCategory = 10, title = "KEGG Pathways Landscape")
+print(kegg_plot) 
+
+# 6. SURVIVAL ANALYSIS ---------------------------
+rownames(counts) <- gsub("\\..*", "", rownames(counts))
+
+tp53_id <- bitr("TP53", fromType = "SYMBOL", toType = "ENSEMBL", OrgDb = org.Hs.eg.db)$ENSEMBL
+expr_values <- counts[tp53_id, ]
+
+# Merge days_to_death and days_to_last_follow_up to preserve vital living patient data
+surv_time <- ifelse(is.na(metadata_df$days_to_death), 
+                    metadata_df$days_to_last_follow_up, 
+                    metadata_df$days_to_death)
+
+surv_df <- data.frame(
+  expression = expr_values,
+  time = as.numeric(surv_time),
+  status = ifelse(metadata_df$vital_status == "Dead", 1, 0)
+)
+
+# Remove rows where survival time data is genuinely missing
+surv_df <- surv_df[!is.na(surv_df$time), ]
+
+# Stratify expression profile by median value split
+surv_df$group <- factor(ifelse(surv_df$expression > median(surv_df$expression), "High Expression", "Low Expression"))
+
+# Compute Kaplan-Meier Curves
+survival_fit <- survfit(Surv(time, status) ~ group, data = surv_df)
+
+# Survival curve plot
+ggsurvplot(survival_fit, data = surv_df, pval = TRUE, conf.int = TRUE,
+           risk.table = TRUE, title = "TP53 Survival Impact in TCGA-BRCA")
