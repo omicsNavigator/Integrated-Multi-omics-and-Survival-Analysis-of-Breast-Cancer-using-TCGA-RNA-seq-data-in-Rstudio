@@ -6,7 +6,7 @@ This project implements an end-to-end transcriptomic and clinical biomarker disc
 ## 🚀 Key Engineering & Biological Highlights
 * **Robust Data Caching:** Implements an automated local caching check (`file.exists`) for the raw `TCGA-BRCA` dataset to eliminate redundant internet downloads and optimize runtime performance.
 * **Low-Count Filtering:** Removes low-count transcript variants (genes with < 10 total reads across samples) to reduce statistical noise and accelerate the `DESeq2` estimation steps.
-* **Censored Survival Re-engineering:** Fixed standard data-loss traps by dynamically merging `days_to_death` (uncensored) and `days_to_last_follow_up` (right-censored) clinical columns, preserving vital data from living cohorts.
+* **Censored Survival engineering:** Merging `days_to_death` (uncensored) and `days_to_last_follow_up` (right-censored) clinical columns, preserving vital data from living cohorts.
 
 ## 🛠️ Tech Stack & Dependencies
 * **Bioconductor Engines:** `TCGAbiolinks` (Data Mining), `DESeq2` (Differential Expression Matrix), `clusterProfiler` / `org.Hs.eg.db` (Annotation & ORA Mappings)
